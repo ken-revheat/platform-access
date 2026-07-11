@@ -1,0 +1,45 @@
+{
+  "name": "@revheat/platform-access",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "default": "./dist/core.js"
+    },
+    "./next": {
+      "types": "./dist/next.d.ts",
+      "default": "./dist/next.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "//scripts": "Named 'compile' NOT 'build' on purpose: pacote treats a 'build' (or prepare/install/prepack) script as a trigger to run `npm install` inside the git-dep clone, which pulls this package's devDeps and crashes arborist. dist/ is committed, so consumers never build. After editing src/, run `npm run compile` and commit dist/.",
+  "scripts": {
+    "compile": "tsc -p tsconfig.build.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "jose": "^6.2.3",
+    "server-only": "^0.0.1"
+  },
+  "peerDependencies": {
+    "next": ">=15"
+  },
+  "peerDependenciesMeta": {
+    "next": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "next": "^16.2.6",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.9"
+  }
+}

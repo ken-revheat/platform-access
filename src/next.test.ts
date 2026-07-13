@@ -133,4 +133,75 @@ describe("createPlatformAccessNext", () => {
       expect(ctx).toBeNull();
     });
   });
+
+  describe("getViewerIdentity", () => {
+    it("returns the verified identity for a valid session", async () => {
+      const core = createPlatformAccessCore({
+        productCode: "readiness_audit",
+        selfHost: "readiness.revheat.com",
+      });
+      const token = await signToken({ userId: VALID_USER_ID });
+      const store = fakeCookieStore({ revheat_access_token: token });
+
+      const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+        const href = typeof url === "string" ? url : url.toString();
+        if (href.endsWith("/api/auth/me")) {
+          return new Response(
+            JSON.stringify({ userId: VALID_USER_ID, email: "owner@acme.com", emailVerified: true }),
+            { status: 200 },
+          );
+        }
+        throw new Error(`unexpected fetch to ${href}`);
+      });
+
+      const next = createPlatformAccessNext(core, {
+        key: KEY,
+        deps: { fetchImpl: fetchImpl as unknown as typeof fetch },
+      });
+
+      const identity = await next.getViewerIdentity(store);
+      expect(identity).toEqual({ email: "owner@acme.com", emailVerified: true });
+    });
+
+    it("returns null (never calls the platform) when there is no access-token cookie", async () => {
+      const core = createPlatformAccessCore({
+        productCode: "readiness_audit",
+        selfHost: "readiness.revheat.com",
+      });
+      const store = fakeCookieStore({});
+      const fetchImpl = vi.fn();
+      const next = createPlatformAccessNext(core, {
+        key: KEY,
+        deps: { fetchImpl: fetchImpl as unknown as typeof fetch },
+      });
+
+      const identity = await next.getViewerIdentity(store);
+      expect(identity).toBeNull();
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("returns null WITHOUT forwarding an unverifiable token to the platform (Cookie-injection guard)", async () => {
+      // A cookie is present but its signature does not verify (wrong key). The
+      // guard must reject it BEFORE core.resolveViewerIdentity interpolates it
+      // into a Cookie header — an unverified token must never reach /api/auth/me.
+      const core = createPlatformAccessCore({
+        productCode: "readiness_audit",
+        selfHost: "readiness.revheat.com",
+      });
+      const forged = await new SignJWT({ userId: VALID_USER_ID })
+        .setProtectedHeader({ alg: "HS256" })
+        .setExpirationTime(Math.floor(Date.now() / 1000) + 3600)
+        .sign(new TextEncoder().encode("a-totally-different-secret-key-32bytes"));
+      const store = fakeCookieStore({ revheat_access_token: forged });
+      const fetchImpl = vi.fn();
+      const next = createPlatformAccessNext(core, {
+        key: KEY,
+        deps: { fetchImpl: fetchImpl as unknown as typeof fetch },
+      });
+
+      const identity = await next.getViewerIdentity(store);
+      expect(identity).toBeNull();
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+  });
 });

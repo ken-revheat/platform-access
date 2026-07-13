@@ -64,6 +64,17 @@ export interface Product {
     appUrl: string | null;
 }
 /**
+ * The verified identity behind an access token, as the platform reports it via
+ * `GET /api/auth/me`. `email` is the login email on the platform User row;
+ * `emailVerified` reflects the DB-backed `email_verified` flag verbatim. Consumers
+ * establishing domain authorization from a company email MUST gate on
+ * `emailVerified === true` — the platform never coerces it.
+ */
+export interface ViewerIdentity {
+    email: string;
+    emailVerified: boolean;
+}
+/**
  * Tri-state products result. `indeterminate` is a distinct, explicit failure so a
  * transient platform error never masquerades as "no products" (which would upsell a
  * paying customer). Do NOT collapse this to a nullable list.
@@ -140,6 +151,20 @@ export interface PlatformAccessCore {
      * resolveOrg — the JWT charset makes Cookie-header injection impossible).
      */
     resolveProducts(token: string, userId: string, deps?: ResolveDeps): Promise<ProductsResult>;
+    /**
+     * Resolve the verified identity (email + emailVerified) for a user by calling the
+     * platform's `GET /api/auth/me` with the access token forwarded as the Cookie.
+     * MIRRORS resolveOrg (no-store, 5s timeout, fail closed). Returns null on any
+     * non-200, network/timeout, malformed body, blank email, or non-boolean
+     * emailVerified. Deliberately NOT cached and NOT tri-state: the sole caller uses it
+     * to establish a durable domain-ownership record from a company email, and a null
+     * simply means "can't email-match right now" — the caller falls back to a
+     * DNS/meta-tag challenge, never a security downgrade.
+     *
+     * INVARIANT: `token` must already have passed verifyAccessToken (same
+     * Cookie-injection-safety contract as resolveOrg/resolveProducts).
+     */
+    resolveViewerIdentity(token: string, userId: string, deps?: ResolveDeps): Promise<ViewerIdentity | null>;
     /**
      * Map the verified products to THIS product's entitlement state. `indeterminate`
      * passes through so the caller can show "retry" (never upsell). A matching entry

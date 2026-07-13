@@ -83,6 +83,18 @@ export interface Product {
 }
 
 /**
+ * The verified identity behind an access token, as the platform reports it via
+ * `GET /api/auth/me`. `email` is the login email on the platform User row;
+ * `emailVerified` reflects the DB-backed `email_verified` flag verbatim. Consumers
+ * establishing domain authorization from a company email MUST gate on
+ * `emailVerified === true` — the platform never coerces it.
+ */
+export interface ViewerIdentity {
+  email: string;
+  emailVerified: boolean;
+}
+
+/**
  * Tri-state products result. `indeterminate` is a distinct, explicit failure so a
  * transient platform error never masquerades as "no products" (which would upsell a
  * paying customer). Do NOT collapse this to a nullable list.
@@ -204,6 +216,25 @@ export interface PlatformAccessCore {
     userId: string,
     deps?: ResolveDeps,
   ): Promise<ProductsResult>;
+
+  /**
+   * Resolve the verified identity (email + emailVerified) for a user by calling the
+   * platform's `GET /api/auth/me` with the access token forwarded as the Cookie.
+   * MIRRORS resolveOrg (no-store, 5s timeout, fail closed). Returns null on any
+   * non-200, network/timeout, malformed body, blank email, or non-boolean
+   * emailVerified. Deliberately NOT cached and NOT tri-state: the sole caller uses it
+   * to establish a durable domain-ownership record from a company email, and a null
+   * simply means "can't email-match right now" — the caller falls back to a
+   * DNS/meta-tag challenge, never a security downgrade.
+   *
+   * INVARIANT: `token` must already have passed verifyAccessToken (same
+   * Cookie-injection-safety contract as resolveOrg/resolveProducts).
+   */
+  resolveViewerIdentity(
+    token: string,
+    userId: string,
+    deps?: ResolveDeps,
+  ): Promise<ViewerIdentity | null>;
 
   /**
    * Map the verified products to THIS product's entitlement state. `indeterminate`
@@ -407,6 +438,48 @@ export function createPlatformAccessCore(
     return result;
   }
 
+  async function resolveViewerIdentity(
+    token: string,
+    _userId: string,
+    deps: ResolveDeps = {},
+  ): Promise<ViewerIdentity | null> {
+    const doFetch = deps.fetchImpl ?? fetch;
+    const base = deps.apiBaseUrl ?? apiBaseUrl;
+
+    let res: Response;
+    try {
+      res = await doFetch(`${base}/api/auth/me`, {
+        method: "GET",
+        headers: { cookie: `revheat_access_token=${token}` },
+        signal: AbortSignal.timeout(ORG_RESOLVE_TIMEOUT_MS),
+        // SECURITY-CRITICAL: never cache — URL is identical per user, only the Cookie
+        // differs, and Next does not key its data cache on headers.
+        cache: "no-store",
+      });
+    } catch {
+      return null; // network error / timeout — fail closed
+    }
+
+    if (!res.ok) return null;
+
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      return null;
+    }
+
+    const raw = body as { email?: unknown; emailVerified?: unknown } | null;
+    const email = raw?.email;
+    const emailVerified = raw?.emailVerified;
+    // Both fields must be present and well-typed. A blank email or a
+    // non-boolean emailVerified can never establish trust — fail closed.
+    const trimmed = typeof email === "string" ? email.trim() : "";
+    if (trimmed.length === 0) return null;
+    if (typeof emailVerified !== "boolean") return null;
+    return { email: trimmed, emailVerified };
+  }
+
   async function getEntitlement(
     token: string,
     userId: string,
@@ -477,6 +550,7 @@ export function createPlatformAccessCore(
     resolveOrg,
     resolveOrgId,
     resolveProducts,
+    resolveViewerIdentity,
     getEntitlement,
     getTrustedContextFromToken,
     parseSessionInfo,

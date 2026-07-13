@@ -11,9 +11,10 @@ import {
   type PlatformAccessCore,
   type ResolveDeps,
   type TrustedContext,
+  type ViewerIdentity,
 } from "./core.js";
 
-export type { TrustedContext } from "./core.js";
+export type { TrustedContext, ViewerIdentity } from "./core.js";
 
 /**
  * Minimal structural cookie-store contract. Satisfied by the real next/headers
@@ -86,6 +87,18 @@ export interface PlatformAccessNext {
   getEntitlement(store: CookieStore): Promise<Entitlement>;
 
   /**
+   * The verified identity (email + emailVerified) behind the session cookie, for a
+   * product that needs to establish domain authorization from a company email.
+   * Reads the HttpOnly access-token cookie, verifies it locally, then resolves the
+   * platform's `GET /api/auth/me`. Returns null when there is no verifiable token or
+   * the platform read fails closed — the caller falls back to an explicit ownership
+   * challenge, never a security downgrade. This is NOT an identity boundary on its
+   * own: gate tenant data with `requireEntitledContext`; use this only as an input to
+   * establishing an ownership record.
+   */
+  getViewerIdentity(store: CookieStore): Promise<ViewerIdentity | null>;
+
+  /**
    * Build the edge UX-gate middleware for this product: no session / expired
    * session -> bounce to the portal login with a `next` back to the request's
    * own path. This is UX gating from the JS-readable session-info cookie only —
@@ -146,6 +159,16 @@ export function createPlatformAccessNext(
     return core.getEntitlement(token, user.userId, deps);
   }
 
+  async function getViewerIdentity(
+    store: CookieStore,
+  ): Promise<ViewerIdentity | null> {
+    const token = store.get(ACCESS_COOKIE)?.value;
+    if (!token) return null;
+    const user = await core.verifyAccessToken(token, key);
+    if (!user) return null;
+    return core.resolveViewerIdentity(token, user.userId, deps);
+  }
+
   function createProxy(cfg?: { skip?: (pathname: string) => boolean }) {
     return function proxy(req: NextRequest): NextResponse {
       if (cfg?.skip?.(req.nextUrl.pathname)) {
@@ -176,6 +199,7 @@ export function createPlatformAccessNext(
     requireTrustedContext,
     requireEntitledContext,
     getEntitlement,
+    getViewerIdentity,
     createProxy,
   };
 }

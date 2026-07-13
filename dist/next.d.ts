@@ -1,7 +1,7 @@
 import "server-only";
 import { NextResponse, type NextRequest } from "next/server";
-import { type Entitlement, type PlatformAccessCore, type ResolveDeps, type TrustedContext } from "./core.js";
-export type { TrustedContext } from "./core.js";
+import { type Entitlement, type PlatformAccessCore, type ResolveDeps, type TrustedContext, type ViewerIdentity } from "./core.js";
+export type { TrustedContext, ViewerIdentity } from "./core.js";
 /**
  * Minimal structural cookie-store contract. Satisfied by the real next/headers
  * `cookies()` result (`ReadonlyRequestCookies`) and by `NextRequest.cookies`, and
@@ -65,6 +65,17 @@ export interface PlatformAccessNext {
      * so a transient problem never renders the upsell to a would-be payer.
      */
     getEntitlement(store: CookieStore): Promise<Entitlement>;
+    /**
+     * The verified identity (email + emailVerified) behind the session cookie, for a
+     * product that needs to establish domain authorization from a company email.
+     * Reads the HttpOnly access-token cookie, verifies it locally, then resolves the
+     * platform's `GET /api/auth/me`. Returns null when there is no verifiable token or
+     * the platform read fails closed — the caller falls back to an explicit ownership
+     * challenge, never a security downgrade. This is NOT an identity boundary on its
+     * own: gate tenant data with `requireEntitledContext`; use this only as an input to
+     * establishing an ownership record.
+     */
+    getViewerIdentity(store: CookieStore): Promise<ViewerIdentity | null>;
     /**
      * Build the edge UX-gate middleware for this product: no session / expired
      * session -> bounce to the portal login with a `next` back to the request's

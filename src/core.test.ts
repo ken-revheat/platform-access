@@ -137,6 +137,137 @@ describe("createPlatformAccessCore", () => {
     });
   });
 
+  describe("resolveViewerIdentity", () => {
+    it("returns email + emailVerified on a clean 200", async () => {
+      const fetchImpl = vi.fn(async () =>
+        new Response(
+          JSON.stringify({ userId: "user-1", email: "owner@acme.com", emailVerified: true }),
+          { status: 200 },
+        ),
+      );
+      const result = await core.resolveViewerIdentity(
+        "token-abc",
+        "user-1",
+        { fetchImpl: fetchImpl as unknown as typeof fetch },
+      );
+      expect(result).toEqual({ email: "owner@acme.com", emailVerified: true });
+    });
+
+    it("surfaces emailVerified=false verbatim (never coerced to true)", async () => {
+      const fetchImpl = vi.fn(async () =>
+        new Response(
+          JSON.stringify({ email: "unverified@acme.com", emailVerified: false }),
+          { status: 200 },
+        ),
+      );
+      const result = await core.resolveViewerIdentity(
+        "token-abc",
+        "user-1",
+        { fetchImpl: fetchImpl as unknown as typeof fetch },
+      );
+      expect(result).toEqual({ email: "unverified@acme.com", emailVerified: false });
+    });
+
+    it("forwards the token as the revheat_access_token cookie to /api/auth/me, no-store", async () => {
+      const fetchImpl = vi.fn(async () =>
+        new Response(JSON.stringify({ email: "owner@acme.com", emailVerified: true }), { status: 200 }),
+      );
+      await core.resolveViewerIdentity(
+        "token-xyz",
+        "user-1",
+        { fetchImpl: fetchImpl as unknown as typeof fetch },
+      );
+      const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("https://api.revheat.com/api/auth/me");
+      expect((init.headers as Record<string, string>).cookie).toBe(
+        "revheat_access_token=token-xyz",
+      );
+      expect(init.cache).toBe("no-store");
+    });
+
+    it("returns null on a non-200 response (fail closed)", async () => {
+      const fetchImpl = vi.fn(async () => new Response("nope", { status: 401 }));
+      const result = await core.resolveViewerIdentity(
+        "token-abc",
+        "user-2",
+        { fetchImpl: fetchImpl as unknown as typeof fetch },
+      );
+      expect(result).toBeNull();
+    });
+
+    it("returns null when fetch throws (network error)", async () => {
+      const fetchImpl = vi.fn(async () => {
+        throw new Error("network unreachable");
+      });
+      const result = await core.resolveViewerIdentity(
+        "token-abc",
+        "user-3",
+        { fetchImpl: fetchImpl as unknown as typeof fetch },
+      );
+      expect(result).toBeNull();
+    });
+
+    it("trims surrounding whitespace from the returned email", async () => {
+      const fetchImpl = vi.fn(async () =>
+        new Response(JSON.stringify({ email: "  owner@acme.com  ", emailVerified: true }), { status: 200 }),
+      );
+      const result = await core.resolveViewerIdentity(
+        "token-abc",
+        "user-7",
+        { fetchImpl: fetchImpl as unknown as typeof fetch },
+      );
+      expect(result).toEqual({ email: "owner@acme.com", emailVerified: true });
+    });
+
+    it("returns null when email is missing or blank", async () => {
+      const missing = vi.fn(async () =>
+        new Response(JSON.stringify({ emailVerified: true }), { status: 200 }),
+      );
+      expect(
+        await core.resolveViewerIdentity("t", "u", { fetchImpl: missing as unknown as typeof fetch }),
+      ).toBeNull();
+
+      const blank = vi.fn(async () =>
+        new Response(JSON.stringify({ email: "   ", emailVerified: true }), { status: 200 }),
+      );
+      expect(
+        await core.resolveViewerIdentity("t", "u", { fetchImpl: blank as unknown as typeof fetch }),
+      ).toBeNull();
+    });
+
+    it("returns null when emailVerified is not a boolean (never trust a truthy string)", async () => {
+      const fetchImpl = vi.fn(async () =>
+        new Response(JSON.stringify({ email: "owner@acme.com", emailVerified: "true" }), { status: 200 }),
+      );
+      const result = await core.resolveViewerIdentity(
+        "token-abc",
+        "user-4",
+        { fetchImpl: fetchImpl as unknown as typeof fetch },
+      );
+      expect(result).toBeNull();
+    });
+
+    it("returns null on a malformed (non-JSON) body", async () => {
+      const fetchImpl = vi.fn(async () => new Response("<html>oops</html>", { status: 200 }));
+      const result = await core.resolveViewerIdentity(
+        "token-abc",
+        "user-5",
+        { fetchImpl: fetchImpl as unknown as typeof fetch },
+      );
+      expect(result).toBeNull();
+    });
+
+    it("never caches — two calls hit the network twice", async () => {
+      const fetchImpl = vi.fn(async () =>
+        new Response(JSON.stringify({ email: "owner@acme.com", emailVerified: true }), { status: 200 }),
+      );
+      const deps = { fetchImpl: fetchImpl as unknown as typeof fetch };
+      await core.resolveViewerIdentity("token-abc", "user-6", deps);
+      await core.resolveViewerIdentity("token-abc", "user-6", deps);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe("getEntitlement", () => {
     it("maps a transient resolveProducts failure to indeterminate, not none", async () => {
       const fetchImpl = vi.fn(async () => {

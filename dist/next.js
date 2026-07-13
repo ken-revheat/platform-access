@@ -55,6 +55,15 @@ export function createPlatformAccessNext(core, opts) {
             return "indeterminate";
         return core.getEntitlement(token, user.userId, deps);
     }
+    async function getViewerIdentity(store) {
+        const token = store.get(ACCESS_COOKIE)?.value;
+        if (!token)
+            return null;
+        const user = await core.verifyAccessToken(token, key);
+        if (!user)
+            return null;
+        return core.resolveViewerIdentity(token, user.userId, deps);
+    }
     function createProxy(cfg) {
         return function proxy(req) {
             if (cfg?.skip?.(req.nextUrl.pathname)) {
@@ -76,6 +85,7 @@ export function createPlatformAccessNext(core, opts) {
         requireTrustedContext,
         requireEntitledContext,
         getEntitlement,
+        getViewerIdentity,
         createProxy,
     };
 }

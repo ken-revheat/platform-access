@@ -186,6 +186,44 @@ export function createPlatformAccessCore(options) {
         productsCache.set(userId, { result, expiresAt: now() + PRODUCTS_CACHE_TTL_MS });
         return result;
     }
+    async function resolveViewerIdentity(token, _userId, deps = {}) {
+        const doFetch = deps.fetchImpl ?? fetch;
+        const base = deps.apiBaseUrl ?? apiBaseUrl;
+        let res;
+        try {
+            res = await doFetch(`${base}/api/auth/me`, {
+                method: "GET",
+                headers: { cookie: `revheat_access_token=${token}` },
+                signal: AbortSignal.timeout(ORG_RESOLVE_TIMEOUT_MS),
+                // SECURITY-CRITICAL: never cache — URL is identical per user, only the Cookie
+                // differs, and Next does not key its data cache on headers.
+                cache: "no-store",
+            });
+        }
+        catch {
+            return null; // network error / timeout — fail closed
+        }
+        if (!res.ok)
+            return null;
+        let body;
+        try {
+            body = await res.json();
+        }
+        catch {
+            return null;
+        }
+        const raw = body;
+        const email = raw?.email;
+        const emailVerified = raw?.emailVerified;
+        // Both fields must be present and well-typed. A blank email or a
+        // non-boolean emailVerified can never establish trust — fail closed.
+        const trimmed = typeof email === "string" ? email.trim() : "";
+        if (trimmed.length === 0)
+            return null;
+        if (typeof emailVerified !== "boolean")
+            return null;
+        return { email: trimmed, emailVerified };
+    }
     async function getEntitlement(token, userId, deps = {}) {
         const result = await resolveProducts(token, userId, deps);
         if (result.status === "indeterminate")
@@ -248,6 +286,7 @@ export function createPlatformAccessCore(options) {
         resolveOrg,
         resolveOrgId,
         resolveProducts,
+        resolveViewerIdentity,
         getEntitlement,
         getTrustedContextFromToken,
         parseSessionInfo,

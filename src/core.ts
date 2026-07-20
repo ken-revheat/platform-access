@@ -103,7 +103,21 @@ export type ProductsResult =
   | { status: "ok"; products: Product[] }
   | { status: "indeterminate" };
 
-export type Entitlement = "entitled" | "locked" | "none" | "indeterminate";
+/**
+ * This product's access verdict for one user.
+ *
+ * `needs_grant` is deliberately its OWN verdict rather than being folded into
+ * "none" or "locked": the org HAS paid, this user just has no seat. Telling them
+ * to buy it (none) or that billing lapsed (locked) are both lies that send them
+ * to the wrong place. Consumers that do not yet render it still fail closed —
+ * see getEntitlement's contract.
+ */
+export type Entitlement =
+  | "entitled"
+  | "locked"
+  | "needs_grant"
+  | "none"
+  | "indeterminate";
 
 export interface SessionInfo {
   userId: string;
@@ -238,10 +252,15 @@ export interface PlatformAccessCore {
 
   /**
    * Map the verified products to THIS product's entitlement state. `indeterminate`
-   * passes through so the caller can show "retry" (never upsell). A matching entry
-   * with a null lockReason is entitled; a non-null lockReason is locked
-   * (past-due/paused); absent is none. The product is found by the factory's
-   * configured `productCode` — never a module constant.
+   * passes through so the caller can show "retry" (never upsell). The product is
+   * found by the factory's configured `productCode` — never a module constant.
+   *
+   * ⛔ The verdict is derived from `state` and NOTHING ELSE — never `lockReason`,
+   * never `billingStatus`. Only `state === "launch"` grants access; every other
+   * value, including one this library has never seen, denies. Callers MUST treat
+   * any verdict other than `"entitled"` as no-access; branch on `"entitled"`
+   * positively rather than falling through to the product on "none of the above",
+   * so a future verdict added here cannot silently open a door.
    */
   getEntitlement(
     token: string,
@@ -489,7 +508,30 @@ export function createPlatformAccessCore(
     if (result.status === "indeterminate") return "indeterminate";
     const p = result.products.find((prod) => prod.code === productCode);
     if (!p) return "none";
-    return p.lockReason !== null ? "locked" : "entitled";
+    // ⛔ Access is decided by `state` and ONLY `state`.
+    //
+    // This function used to read `lockReason !== null ? "locked" : "entitled"`,
+    // which was a LIVE revenue hole (found 2026-07-20 in QuotaFit, from which this
+    // library was ported while broken). `/api/me/products` returns one row per
+    // CATALOG entry, not per entitlement, and products.service.ts sets
+    // `lockReason: state === "locked_billing" ? ownStatus : null` — so a null
+    // lockReason is true for THREE of the four wire states, only one of which
+    // means the user may enter. `billingStatus` is no safer: it is a live
+    // `active`/`trialing` on `needs_grant`.
+    //
+    // The default arm DENIES on purpose: a renamed or newly-added platform state
+    // must cost a user an access screen, never cost us revenue.
+    switch (p.state) {
+      case "launch":
+        return "entitled"; // paid + this user has a seat
+      case "available":
+        return "none"; // org owns nothing — upsell tile
+      case "needs_grant":
+        return "needs_grant"; // org paid, this user has no seat
+      case "locked_billing":
+      default:
+        return "locked";
+    }
   }
 
   async function getTrustedContextFromToken(

@@ -231,7 +231,30 @@ export function createPlatformAccessCore(options) {
         const p = result.products.find((prod) => prod.code === productCode);
         if (!p)
             return "none";
-        return p.lockReason !== null ? "locked" : "entitled";
+        // ⛔ Access is decided by `state` and ONLY `state`.
+        //
+        // This function used to read `lockReason !== null ? "locked" : "entitled"`,
+        // which was a LIVE revenue hole (found 2026-07-20 in QuotaFit, from which this
+        // library was ported while broken). `/api/me/products` returns one row per
+        // CATALOG entry, not per entitlement, and products.service.ts sets
+        // `lockReason: state === "locked_billing" ? ownStatus : null` — so a null
+        // lockReason is true for THREE of the four wire states, only one of which
+        // means the user may enter. `billingStatus` is no safer: it is a live
+        // `active`/`trialing` on `needs_grant`.
+        //
+        // The default arm DENIES on purpose: a renamed or newly-added platform state
+        // must cost a user an access screen, never cost us revenue.
+        switch (p.state) {
+            case "launch":
+                return "entitled"; // paid + this user has a seat
+            case "available":
+                return "none"; // org owns nothing — upsell tile
+            case "needs_grant":
+                return "needs_grant"; // org paid, this user has no seat
+            case "locked_billing":
+            default:
+                return "locked";
+        }
     }
     async function getTrustedContextFromToken(token, key, deps = {}) {
         const user = await verifyAccessToken(token, key);

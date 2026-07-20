@@ -76,7 +76,7 @@ describe("createPlatformAccessCore", () => {
         new Response(
           JSON.stringify({
             products: [
-              { code: "quotafit", state: "active", lockReason: null, billingStatus: "current", appUrl: "https://hire.revheat.com" },
+              { code: "quotafit", state: "launch", lockReason: null, billingStatus: "active", appUrl: "https://hire.revheat.com" },
             ],
           }),
           { status: 200 },
@@ -90,7 +90,7 @@ describe("createPlatformAccessCore", () => {
       expect(result).toEqual({
         status: "ok",
         products: [
-          { code: "quotafit", state: "active", lockReason: null, billingStatus: "current", appUrl: "https://hire.revheat.com" },
+          { code: "quotafit", state: "launch", lockReason: null, billingStatus: "active", appUrl: "https://hire.revheat.com" },
         ],
       });
     });
@@ -292,68 +292,140 @@ describe("createPlatformAccessCore", () => {
       expect(entitlement).toBe("indeterminate");
     });
 
-    it("returns entitled when the product has no lockReason", async () => {
-      const fetchImpl = vi.fn(async () =>
-        new Response(
-          JSON.stringify({ products: [{ code: "quotafit", lockReason: null }] }),
-          { status: 200 },
-        ),
+    // Every fixture below carries the FULL wire shape the platform actually emits
+    // (state + lockReason + billingStatus together). The previous fixtures omitted
+    // `state` entirely and paired a null lockReason with entitlement — a payload
+    // /api/me/products cannot produce. That fiction is precisely what let the
+    // lockReason-based gate look covered while it gave the product away free.
+    const wire = (over: Record<string, unknown>) => ({
+      code: "quotafit",
+      appUrl: "https://hire.revheat.com",
+      ...over,
+    });
+    const respond = (products: unknown[]) =>
+      vi.fn(async () =>
+        new Response(JSON.stringify({ products }), { status: 200 }),
       );
-      const entitlement = await core.getEntitlement(
-        "token-abc",
-        "user-7",
-        { fetchImpl: fetchImpl as unknown as typeof fetch },
-      );
+
+    it("returns entitled only for state 'launch'", async () => {
+      const fetchImpl = respond([
+        wire({ state: "launch", lockReason: null, billingStatus: "active" }),
+      ]);
+      const entitlement = await core.getEntitlement("token-abc", "user-7", {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
       expect(entitlement).toBe("entitled");
     });
 
-    it("returns locked when the product has a lockReason", async () => {
-      const fetchImpl = vi.fn(async () =>
-        new Response(
-          JSON.stringify({ products: [{ code: "quotafit", lockReason: "past_due" }] }),
-          { status: 200 },
-        ),
-      );
-      const entitlement = await core.getEntitlement(
-        "token-abc",
-        "user-8",
-        { fetchImpl: fetchImpl as unknown as typeof fetch },
-      );
+    // ⛔ PRIME DIRECTIVE GUARDS — these two exist to stop a future "helpful" billing
+    // check from being re-added. `past_due` and `trialing` are both inside the
+    // platform's ENTITLED_PRODUCT_STATUSES (product-access.ts:50-51), so both emit
+    // state `launch`; dunning is surfaced via the separate `billingStatus` field and
+    // must NEVER gate entry. If someone adds `if (billingStatus === "past_due")
+    // return "locked"`, every customer in dunning loses access — and without these
+    // assertions the whole suite would still go green.
+    it("keeps a dunning (past_due) customer entitled — billingStatus never gates", async () => {
+      const fetchImpl = respond([
+        wire({ state: "launch", lockReason: null, billingStatus: "past_due" }),
+      ]);
+      const entitlement = await core.getEntitlement("token-abc", "user-pd", {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(entitlement).toBe("entitled");
+    });
+
+    it("keeps a trialing customer entitled", async () => {
+      const fetchImpl = respond([
+        wire({ state: "launch", lockReason: null, billingStatus: "trialing" }),
+      ]);
+      const entitlement = await core.getEntitlement("token-abc", "user-tr", {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(entitlement).toBe("entitled");
+    });
+
+    it("returns locked for state 'locked_billing'", async () => {
+      const fetchImpl = respond([
+        wire({ state: "locked_billing", lockReason: "past_due", billingStatus: "past_due" }),
+      ]);
+      const entitlement = await core.getEntitlement("token-abc", "user-8", {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
       expect(entitlement).toBe("locked");
     });
 
+    // REGRESSION (live bug, 2026-07-20): `available` carries a NULL lockReason.
+    // The old gate read that null as "entitled" and handed the paid product to
+    // every user whose org owned nothing at all.
+    it("returns none for state 'available' despite a null lockReason", async () => {
+      const fetchImpl = respond([
+        wire({ state: "available", lockReason: null, billingStatus: "" }),
+      ]);
+      const entitlement = await core.getEntitlement("token-abc", "user-7b", {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(entitlement).toBe("none");
+      expect(entitlement).not.toBe("entitled");
+    });
+
+    // REGRESSION: `needs_grant` carries a null lockReason AND a live billingStatus
+    // — so neither of the two old candidate fields would have denied it. The org
+    // paid; this specific user has no seat.
+    it("returns needs_grant for state 'needs_grant' despite a live billingStatus", async () => {
+      const fetchImpl = respond([
+        wire({ state: "needs_grant", lockReason: null, billingStatus: "active" }),
+      ]);
+      const entitlement = await core.getEntitlement("token-abc", "user-7c", {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(entitlement).toBe("needs_grant");
+      expect(entitlement).not.toBe("entitled");
+    });
+
+    // Fail-closed: an unrecognized state must cost an access screen, not revenue.
+    it("denies an unknown future state rather than defaulting to entitled", async () => {
+      const fetchImpl = respond([
+        wire({ state: "some_future_state", lockReason: null, billingStatus: "active" }),
+      ]);
+      const entitlement = await core.getEntitlement("token-abc", "user-7d", {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(entitlement).toBe("locked");
+      expect(entitlement).not.toBe("entitled");
+    });
+
+    // parseProduct coerces a missing/non-string state to "" — which must land in
+    // the denying default arm, not slip through.
+    it("denies a row whose state field is missing entirely", async () => {
+      const fetchImpl = respond([wire({ lockReason: null, billingStatus: "active" })]);
+      const entitlement = await core.getEntitlement("token-abc", "user-7e", {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(entitlement).not.toBe("entitled");
+    });
+
     it("returns none when the configured productCode is absent from a clean response", async () => {
-      const fetchImpl = vi.fn(async () =>
-        new Response(JSON.stringify({ products: [{ code: "some-other-product", lockReason: null }] }), {
-          status: 200,
-        }),
-      );
-      const entitlement = await core.getEntitlement(
-        "token-abc",
-        "user-9",
-        { fetchImpl: fetchImpl as unknown as typeof fetch },
-      );
+      const fetchImpl = respond([
+        { code: "some-other-product", state: "launch", lockReason: null, billingStatus: "active" },
+      ]);
+      const entitlement = await core.getEntitlement("token-abc", "user-9", {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
       expect(entitlement).toBe("none");
     });
 
     it("uses the factory's configured productCode, not a hardcoded constant", async () => {
       const laCore = makeCore({ productCode: "lead-accelerator", selfHost: "leads.revheat.com" });
-      const fetchImpl = vi.fn(async () =>
-        new Response(
-          JSON.stringify({
-            products: [
-              { code: "quotafit", lockReason: null },
-              { code: "lead-accelerator", lockReason: null },
-            ],
-          }),
-          { status: 200 },
-        ),
-      );
-      const entitlement = await laCore.getEntitlement(
-        "token-abc",
-        "user-10",
-        { fetchImpl: fetchImpl as unknown as typeof fetch },
-      );
+      // quotafit is deliberately NOT entitled here: if the lookup ignored the
+      // configured productCode and matched the first row, this would come back
+      // "none" rather than "entitled".
+      const fetchImpl = respond([
+        { code: "quotafit", state: "available", lockReason: null, billingStatus: "" },
+        { code: "lead-accelerator", state: "launch", lockReason: null, billingStatus: "active" },
+      ]);
+      const entitlement = await laCore.getEntitlement("token-abc", "user-10", {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
       expect(entitlement).toBe("entitled");
     });
   });

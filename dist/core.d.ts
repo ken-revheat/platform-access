@@ -85,7 +85,16 @@ export type ProductsResult = {
 } | {
     status: "indeterminate";
 };
-export type Entitlement = "entitled" | "locked" | "none" | "indeterminate";
+/**
+ * This product's access verdict for one user.
+ *
+ * `needs_grant` is deliberately its OWN verdict rather than being folded into
+ * "none" or "locked": the org HAS paid, this user just has no seat. Telling them
+ * to buy it (none) or that billing lapsed (locked) are both lies that send them
+ * to the wrong place. Consumers that do not yet render it still fail closed —
+ * see getEntitlement's contract.
+ */
+export type Entitlement = "entitled" | "locked" | "needs_grant" | "none" | "indeterminate";
 export interface SessionInfo {
     userId: string;
     orgId: string;
@@ -167,10 +176,15 @@ export interface PlatformAccessCore {
     resolveViewerIdentity(token: string, userId: string, deps?: ResolveDeps): Promise<ViewerIdentity | null>;
     /**
      * Map the verified products to THIS product's entitlement state. `indeterminate`
-     * passes through so the caller can show "retry" (never upsell). A matching entry
-     * with a null lockReason is entitled; a non-null lockReason is locked
-     * (past-due/paused); absent is none. The product is found by the factory's
-     * configured `productCode` — never a module constant.
+     * passes through so the caller can show "retry" (never upsell). The product is
+     * found by the factory's configured `productCode` — never a module constant.
+     *
+     * ⛔ The verdict is derived from `state` and NOTHING ELSE — never `lockReason`,
+     * never `billingStatus`. Only `state === "launch"` grants access; every other
+     * value, including one this library has never seen, denies. Callers MUST treat
+     * any verdict other than `"entitled"` as no-access; branch on `"entitled"`
+     * positively rather than falling through to the product on "none of the above",
+     * so a future verdict added here cannot silently open a door.
      */
     getEntitlement(token: string, userId: string, deps?: ResolveDeps): Promise<Entitlement>;
     /**

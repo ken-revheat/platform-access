@@ -79,6 +79,64 @@ describe("createPlatformAccessNext", () => {
       expect((caught as EntitlementError).entitlement).toBe("indeterminate");
     });
 
+    // The new `needs_grant` verdict crossing the SECURITY boundary. Widening the
+    // Entitlement union is only safe because every gate branches on "entitled"
+    // positively; this pins that for the one verdict that did not exist before.
+    // The platform's own API guard already 403s a seatless member
+    // (product-access.guard.ts) — this makes the library agree with it.
+    it("throws for needs_grant — an unseated member of a paying org is NOT entitled", async () => {
+      const core = createPlatformAccessCore({
+        productCode: "quotafit",
+        selfHost: "hire.revheat.com",
+      });
+
+      const token = await signToken({ userId: VALID_USER_ID });
+      const store = fakeCookieStore({ revheat_access_token: token });
+
+      const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+        const href = typeof url === "string" ? url : url.toString();
+        if (href.endsWith("/api/org/me")) {
+          return new Response(
+            JSON.stringify({ id: VALID_ORG_ID, name: "Acme Roofing" }),
+            { status: 200 },
+          );
+        }
+        if (href.endsWith("/api/me/products")) {
+          return new Response(
+            JSON.stringify({
+              // The org PAID — billingStatus is live and lockReason is null.
+              // Only `state` reveals that this user holds no seat.
+              products: [
+                {
+                  code: "quotafit",
+                  state: "needs_grant",
+                  lockReason: null,
+                  billingStatus: "active",
+                  appUrl: "https://hire.revheat.com",
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        throw new Error(`unexpected fetch to ${href}`);
+      });
+
+      const next = createPlatformAccessNext(core, {
+        key: KEY,
+        deps: { fetchImpl: fetchImpl as unknown as typeof fetch },
+      });
+
+      let caught: unknown;
+      try {
+        await next.requireEntitledContext(store);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(EntitlementError);
+      expect((caught as EntitlementError).entitlement).toBe("needs_grant");
+    });
+
     it("resolves the trusted context when entitled", async () => {
       const core = createPlatformAccessCore({
         productCode: "quotafit",
@@ -99,7 +157,16 @@ describe("createPlatformAccessNext", () => {
         if (href.endsWith("/api/me/products")) {
           return new Response(
             JSON.stringify({
-              products: [{ code: "quotafit", lockReason: null }],
+              // Full wire shape — `state: "launch"` is what actually grants access.
+              products: [
+                {
+                  code: "quotafit",
+                  state: "launch",
+                  lockReason: null,
+                  billingStatus: "active",
+                  appUrl: "https://hire.revheat.com",
+                },
+              ],
             }),
             { status: 200 },
           );
